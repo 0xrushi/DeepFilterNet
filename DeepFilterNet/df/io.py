@@ -7,18 +7,34 @@ from loguru import logger
 from numpy import ndarray
 from torch import Tensor
 
+# PATCH START: Handle missing AudioMetaData and backend in newer torchaudio
 try:
     from torchaudio import AudioMetaData
 
     TA_RESAMPLE_SINC = "sinc_interp_hann"
     TA_RESAMPLE_KAISER = "sinc_interp_kaiser"
 except ImportError:
-    from torchaudio.backend.common import AudioMetaData
+    try:
+        from torchaudio.backend.common import AudioMetaData
 
-    TA_RESAMPLE_SINC = "sinc_interpolation"
-    TA_RESAMPLE_KAISER = "kaiser_window"
+        TA_RESAMPLE_SINC = "sinc_interpolation"
+        TA_RESAMPLE_KAISER = "kaiser_window"
+    except ImportError:
+        # Define dummy AudioMetaData for newer torchaudio versions (e.g. 2.9+)
+        class AudioMetaData:
+            def __init__(self, sample_rate, num_frames, num_channels, bits_per_sample=0, encoding="UNKNOWN"):
+                self.sample_rate = sample_rate
+                self.num_frames = num_frames
+                self.num_channels = num_channels
+                self.bits_per_sample = bits_per_sample
+                self.encoding = encoding
+
+        TA_RESAMPLE_SINC = "sinc_interp_hann"
+        TA_RESAMPLE_KAISER = "sinc_interp_kaiser"
+# PATCH END
 
 from df.logger import warn_once
+from df.torchcodec_loader import check_torchcodec
 from df.utils import download_file, get_cache_dir, get_git_root
 
 
@@ -37,13 +53,42 @@ def load_audio(
         audio (Tensor): Audio tensor of shape [C, T], if channels_first=True (default).
         info (AudioMetaData): Meta data of the original audio file. Contains the original sr.
     """
+    require_torchcodec = os.getenv("DF_REQUIRE_TORCHCODEC", "0") == "1"
+    check_torchcodec(require=require_torchcodec)
+
     ikwargs = {}
     if "format" in kwargs:
         ikwargs["format"] = kwargs["format"]
     rkwargs = {}
     if "method" in kwargs:
         rkwargs["method"] = kwargs.pop("method")
-    info: AudioMetaData = ta.info(file, **ikwargs)
+    
+    # PATCH START: Handle missing ta.info
+    if hasattr(ta, "info"):
+        info: AudioMetaData = ta.info(file, **ikwargs)
+    else:
+        # Fallback for newer torchaudio where info is missing
+        try:
+            from torchcodec.decoders import AudioDecoder
+            d = AudioDecoder(file)
+            m = d.metadata
+            # Estimate num_frames (approximate as strictly not available in simple metadata)
+            # But accurate enough for sample rate scaling checks
+            num_frames = int(m.duration_seconds * m.sample_rate)
+            info = AudioMetaData(m.sample_rate, num_frames, m.num_channels, 0, m.codec)
+        except Exception:
+             # Fallback using soundfile if torchcodec missing
+             try:
+                 import soundfile as sf
+                 sf_info = sf.info(file)
+                 info = AudioMetaData(sf_info.samplerate, sf_info.frames, sf_info.channels, 0, sf_info.format)
+             except ImportError:
+                 # Last resort: load audio to get metadata (slow)
+                 # We can't use kwargs that depend on info here yet
+                 temp_audio, temp_sr = ta.load(file)
+                 info = AudioMetaData(temp_sr, temp_audio.shape[1], temp_audio.shape[0], 0, "UNKNOWN")
+    # PATCH END
+
     if "num_frames" in kwargs and sr is not None:
         kwargs["num_frames"] *= info.sample_rate // sr
     audio, orig_sr = ta.load(file, **kwargs)

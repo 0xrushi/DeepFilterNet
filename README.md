@@ -94,6 +94,19 @@ pip install deepfilternet
 pip install deepfilternet[train]
 ```
 
+#### TorchCodec (CUDA) note
+
+On some Linux setups, importing `torchcodec` can fail with a missing CUDA runtime library error
+like `libnppicc.so.12: cannot open shared object file`. In that case install the missing pip
+dependency into the same environment:
+
+```bash
+pip install nvidia-npp-cu12
+```
+
+To fail fast (instead of torchaudio falling back to a different audio backend), set:
+`DF_REQUIRE_TORCHCODEC=1`.
+
 To enhance noisy audio files using DeepFilterNet run
 ```bash
 # Specify an output directory with --output-dir [OUTPUT_DIR]
